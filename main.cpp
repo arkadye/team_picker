@@ -62,9 +62,15 @@ Player get_player(std::istream& is, const std::vector<std::string>& stats)
 	Player result;
 	is >> std::ws;
 	std::getline(is, result.name);
-	std::string stats_str;
 
+	// Skip player number [#00]
+	std::string number;
+	is >> number;
+	is >> std::ws;
+
+	std::string stats_str;
 	std::getline(is, stats_str);
+	
 	std::istringstream stats_data{ stats_str };
 	while (!std::isdigit(stats_data.peek()))
 	{
