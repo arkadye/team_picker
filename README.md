@@ -3,13 +3,23 @@ Input team stats (you may need to adjust the input parser) and get an ideal team
 
 ## To use:
 
+### Released binary
+
 Download from here: https://github.com/arkadye/team_picker/releases
 
-OR
+### Building with CMake
+
+If you do not already have CMake set up, setup CMake.
+
+There are is no special setup. Simply run CMake on the folder containing `CMakeLists.txt`. (e.g. `cmake .` from the folder containing it) or `cmake . --build`.
+
+A CMake tutorial is beyond the scope of this Readme.
+
+### Building from source
 
 Get yourself a C++ compiler. This was written with Visual Studio Community Edition 2022 so I know for sure that works.
 
-Compile main.cpp.
+Compile main.cpp with C++20 or later enabled.
 
 Setup your composition.txt to describe the positions being picked and the calculations to base each position on.
 

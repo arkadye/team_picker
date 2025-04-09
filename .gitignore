@@ -31,5 +31,21 @@
 *.out
 *.app
 
+# Symbols
+*.pdb
+
 # Visual Studio
 .vs/
+*.sln
+*.vcxproj
+*.vcxproj.*
+*.log
+*.recipe
+*.tlog
+*.lastbuildstate
+
+# Cmake
+*.cmake
+CMakeFiles/*
+team_picker.dir/*
+CMakeCache.txt
