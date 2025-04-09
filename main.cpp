@@ -14,6 +14,7 @@
 #include <array>
 #include <format>
 #include <filesystem>
+#include <ranges>
 
 using IST = std::istream_iterator<std::string>;
 
@@ -477,9 +478,10 @@ struct StartingPositionDescription
 	double score = 0.0f;
 };
 
+template <typename ItType>
 std::pair<std::vector<std::pair<std::string_view, PositionDescription>>, double> find_best_positions(
-	std::vector<PickTempData>::const_iterator first,
-	std::vector<PickTempData>::const_iterator last,
+	ItType first,
+	ItType last,
 	const std::vector<std::string_view>& positions)
 {
 	assert(std::distance(first, last) == positions.size());
@@ -521,13 +523,64 @@ std::pair<std::vector<std::pair<std::string_view, PositionDescription>>, double>
 	return std::pair{ std::move(result), best_overall_score };
 }
 
+template <typename ItType>
 std::pair<std::vector<std::pair<std::string_view, PositionDescription>>, double> find_best_positions(
-	std::vector<PickTempData>::const_iterator first,
-	std::vector<PickTempData>::const_iterator last,
+	ItType first,
+	ItType last,
 	const std::vector<std::string>& positions)
 {
 	std::vector<std::string_view> svpos(begin(positions), end(positions));
 	return find_best_positions(first, last, svpos);
+}
+
+template <typename RangeType>
+std::pair<std::vector<std::pair<std::string_view, PositionDescription>>, double> find_best_positions(
+	const RangeType& range,
+	const std::vector<std::string>& positions)
+{
+	return find_best_positions(begin(range), end(range), positions);
+}
+
+template <typename ItType>
+std::vector<StartingPositionDescription> make_line_up(
+	ItType first,
+	ItType last,
+	const std::vector<std::pair<std::string_view, PositionDescription>>& attacking_lineup,
+	const std::vector<std::pair<std::string_view, PositionDescription>>& defending_lineup)
+{
+	assert(attacking_lineup.size() == defending_lineup.size());
+	std::vector<StartingPositionDescription> result;
+	result.reserve(attacking_lineup.size());
+
+	auto find_data = [](std::string_view name, const std::vector<std::pair<std::string_view, PositionDescription>>& score)
+		{
+			const auto result = std::ranges::find(score, name, [](const std::pair<std::string_view, PositionDescription>& p) {return p.first; });
+			assert(result != end(score));
+			return result->second;
+		};
+
+	auto make_starting_position_data = [&find_data, &attacking_lineup, &defending_lineup](const PickTempData& starter)
+		{
+			StartingPositionDescription r;
+			r.name = starter.name;
+			r.offence = find_data(starter.name, attacking_lineup);
+			r.defence = find_data(starter.name, defending_lineup);
+			r.score = r.offence.score + r.defence.score;
+			return r;
+		};
+
+	std::transform(first, last, std::back_inserter(result), make_starting_position_data);
+	return result;
+}
+
+template <typename RangeType>
+std::vector<StartingPositionDescription> make_line_up(
+	const RangeType& line_up,
+	const std::vector<std::pair<std::string_view, PositionDescription>>& attacking_lineup,
+	const std::vector<std::pair<std::string_view, PositionDescription>>& defending_lineup)
+
+{
+	return make_line_up(begin(line_up), end(line_up), attacking_lineup, defending_lineup);
 }
 
 std::pair<std::vector<StartingPositionDescription>, double> get_initial_try_starters(const std::vector<PickTempData>& data, const PositionRequirements& requirements)
@@ -540,129 +593,133 @@ std::pair<std::vector<StartingPositionDescription>, double> get_initial_try_star
 	auto first = begin(data);
 	auto last = first + target_size;
 
-	auto [attacking_lineup, attacking_score] = find_best_positions(first, last, requirements.attacking);
-	auto [defending_lineup, defending_score] = find_best_positions(first, last, requirements.defensive);
+	const auto [attacking_lineup, attacking_score] = find_best_positions(first, last, requirements.attacking);
+	const auto [defending_lineup, defending_score] = find_best_positions(first, last, requirements.defensive);
 	const double total_score = attacking_score + defending_score;
 
-	std::vector<StartingPositionDescription> result;
-	result.reserve(target_size);
-
-	for (const PickTempData& starter : std::ranges::subrange{ first,last })
-	{
-		auto find_data = [name = starter.name](const std::vector<std::pair<std::string_view, PositionDescription>>& score)
-			{
-				const auto result = std::ranges::find(score, name, [](const std::pair<std::string_view, PositionDescription>& p) {return p.first; });
-				assert(result != end(score));
-				return result->second;
-			};
-
-		StartingPositionDescription r;
-		r.name = starter.name;
-		r.offence = find_data(attacking_lineup);
-		r.defence = find_data(defending_lineup);
-		r.score = r.offence.score + r.defence.score;
-		result.push_back(std::move(r));
-	}
-	return std::pair{ result, total_score };
+	std::vector<StartingPositionDescription> result = make_line_up(first, last, attacking_lineup, defending_lineup);
+	return std::pair{ std::move(result), total_score };
 }
 
-std::pair<std::vector<StartingPositionDescription>, bool> try_swapping_in_player(std::vector<StartingPositionDescription> picks, const std::vector<PickTempData>& data, const PositionRequirements& requirements, const PickTempData& player)
+std::optional<std::pair<std::vector<StartingPositionDescription>, double>> try_swapping_in_player_for_player(
+	std::vector<const PickTempData*> picks,			// Current starting line up
+	const std::vector<PickTempData>& roster_data,	// Roster data
+	std::string_view player_in,						// Player in
+	std::string_view player_out,					// Player out
+	const PositionRequirements& requirements,		// Position requirements
+	double current_best								// Current best evaluation
+)
 {
-	if (std::ranges::find(picks, player.name, [](const StartingPositionDescription& spd) {return spd.name; }) != end(picks))
+	assert(std::ranges::find(picks, player_in, [](const PickTempData* elem) {return elem->name; }) == end(picks));
+
+	const auto pick_out_it = std::ranges::find(picks, player_out, &PickTempData::name);
+	assert(pick_out_it != end(picks));
+
+	const auto roster_in_it = std::ranges::find(roster_data, player_in, &PickTempData::name);
+	assert(roster_in_it != end(roster_data));
+
+	*pick_out_it = &(*roster_in_it);
+
+	auto picks_view = picks | std::ranges::views::transform([](const PickTempData* e) {return *e; });
+
+	const auto [attacking_lineup, attacking_score] = find_best_positions(picks_view, requirements.attacking);
+	const auto [defending_lineup, defending_score] = find_best_positions(picks_view, requirements.defensive);
+	const double total_score = attacking_score + defending_score;
+
+	if (total_score > current_best)
 	{
-		return std::pair{ picks,false };
+		std::vector<StartingPositionDescription> line_up = make_line_up(picks_view, attacking_lineup, defending_lineup);
+		return std::pair{ std::move(line_up), total_score };
+	}
+	return std::nullopt;
+}
+
+std::optional<std::pair<std::vector<StartingPositionDescription>, double>> try_swapping_in_player(
+	const std::vector<const PickTempData*>& picks,	// Current starting line up
+	const std::vector<PickTempData>& roster_data,			// Roster data
+	std::string_view player_in,								// Player in
+	const PositionRequirements& requirements,				// Position requirements
+	double current_best										// Current best scores
+)
+{
+	// If this is a player already in the starting lineup, skip them.
+	if (std::ranges::find(picks, player_in, &PickTempData::name) != end(picks))
+	{
+		return std::nullopt;
 	}
 
-	const double old_defence_score = std::transform_reduce(begin(picks), end(picks), 0.0, std::plus<double>{},
-		[](const StartingPositionDescription& spd) {return spd.defence.score; });
-
-	auto get_pick_data = [&data](std::string_view name) -> const PickTempData&
+	auto get_pick_data_it = [&roster_data](std::string_view name)
 		{
-			const auto find_result = std::ranges::find(data, name, [](const PickTempData& ptd) {return ptd.name; });
-			assert(find_result != end(data));
+			return std::ranges::find(roster_data, name, &PickTempData::name);
+		};
+
+	auto get_pick_data = [&get_pick_data_it, &roster_data](std::string_view name) -> const PickTempData&
+		{
+			const auto find_result = get_pick_data_it(name);
+			assert(find_result != end(roster_data));
 			return *find_result;
 		};
 
-	std::vector<PickTempData> data_copy;
-	data_copy.reserve(picks.size());
-	std::transform(begin(picks), end(picks), std::back_inserter(data_copy),
-		[&get_pick_data](const StartingPositionDescription& spd) {return get_pick_data(spd.name); });
-
-	std::vector<StartingPositionDescription> best_improvement;
-	std::string_view swapped_out_player;
-	double best_delta = 0.0;
-
-	for (std::size_t i = 0u; i < picks.size(); ++i)
-	{
-		if (player.max_score < picks[i].score) continue;
-		StartingPositionDescription backup_spd = picks[i];
-		PickTempData backup_ptd = data_copy[i];
-
-		data_copy[i] = player;
-		picks[i].name = player.name;
-		picks[i].offence.score = player.position_scores.find(backup_spd.offence.position)->second;
-		const double offence_delta = picks[i].offence.score - backup_spd.offence.score;
-		auto [new_positions, new_score] = find_best_positions(begin(data_copy), end(data_copy), requirements.defensive);
-		const double defence_delta = new_score - old_defence_score;
-		const double change_delta = offence_delta + defence_delta;
-		if (change_delta > best_delta)
+	auto get_pick_data_ptr = [&get_pick_data](std::string_view name) -> const PickTempData*
 		{
-			best_improvement = picks;
-			best_delta = change_delta;
-			swapped_out_player = backup_spd.name;
-			for (StartingPositionDescription& pick : best_improvement)
-			{
-				auto find_it = std::ranges::find(new_positions, pick.name, [](const auto& d) {return d.first; });
-				assert(find_it != end(new_positions));
-				pick.defence = find_it->second;
-				pick.score = pick.offence.score + pick.defence.score;
-			}
+			const PickTempData& result = get_pick_data(name);
+			return &result;
+		};
+
+	std::optional<std::pair<std::vector<StartingPositionDescription>, double>> result;
+	std::string_view player_out;
+	for (const PickTempData* starter : picks)
+	{
+		if (auto swap_result_optional = try_swapping_in_player_for_player(picks, roster_data, player_in, starter->name, requirements, current_best))
+		{
+			auto& [new_picks, new_best] = *swap_result_optional;
+			std::cout << std::format("     Score improvement replacing {}: {}\n", starter->name, (new_best - current_best));
+			assert(new_best > current_best);
+			current_best = new_best;
+			result = std::move(*swap_result_optional);
+			player_out = starter->name;
 		}
-
-		data_copy[i] = backup_ptd;
-		picks[i] = backup_spd;
 	}
 
-	if (best_improvement.empty())
+	if (result.has_value())
 	{
-		return std::pair{ picks, false };
+		std::cout << std::format("    Swapped in {} replacing {}\n", player_in, player_out);
 	}
-
-	for (StartingPositionDescription& spd : best_improvement)
-	{
-		const PickTempData& pdt = get_pick_data(spd.name);
-		spd.defence.score = pdt.position_scores.find(spd.defence.position)->second;
-		spd.score = spd.defence.score + spd.offence.score;
-	}
-	std::cout << std::format("    Swapped in {} replacing {}\n", player.name, swapped_out_player);
-
-	return std::pair{ best_improvement, true };
+	return result;
 }
 
 std::vector<RosterPosition> pick_team(const std::vector<Player>& roster, const PositionRequirements& requirements)
 {
 	std::vector<PickTempData> pick_data;
 	pick_data.reserve(roster.size());
-	std::transform(begin(roster), end(roster), std::back_inserter(pick_data), [&r = requirements](const Player& p) {return to_pick_data(p, r); });
-	std::ranges::sort(pick_data, {}, [](const PickTempData& ptd) {return ptd.max_score; });
-	std::ranges::reverse(pick_data);
+	std::ranges::transform(roster, std::back_inserter(pick_data), [&r = requirements](const Player& p) {return to_pick_data(p, r); });
+	std::ranges::sort(pick_data, {}, [](const PickTempData& ptd) {return -ptd.max_score; });
 
 	auto [starters, best_score] = get_initial_try_starters(pick_data, requirements);
+	std::ranges::sort(starters, {}, &StartingPositionDescription::score);
 
 	bool has_made_change = true;
 	int changes_tried = 0;
 	while (has_made_change)
 	{
 		has_made_change = false;
+
+		std::vector<const PickTempData*> starter_data;
+		starter_data.reserve(starters.size());
+		std::ranges::transform(starters, std::back_inserter(starter_data), [&pick_data](const StartingPositionDescription& starter)
+			{
+				auto find_result = std::ranges::find(pick_data, starter.name, &PickTempData::name);
+				assert(find_result != end(pick_data));
+				return &(*find_result);
+			});
+
 		for (const PickTempData& trial_player : pick_data)
 		{
 			std::cout << std::format("{}: trying {} as a starter.\n", changes_tried++, trial_player.name);
-			auto [new_starters, change_made] = try_swapping_in_player(starters, pick_data, requirements, trial_player);
-			if (change_made)
+			if (auto swap_result_opt = try_swapping_in_player(starter_data, pick_data, trial_player.name, requirements, best_score))
 			{
 				std::cout << "    Swap made. Restarting.\n";
-				const double new_score = std::transform_reduce(begin(new_starters), end(new_starters), 0.0, std::plus<double>{},
-					[](const StartingPositionDescription& spd) {return spd.score; });
+				auto& [new_starters, new_score] = *swap_result_opt;
 				assert(new_score > best_score);
 				best_score = new_score;
 				starters = std::move(new_starters);
