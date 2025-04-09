@@ -74,14 +74,21 @@ Player get_player(std::istream& is, const std::vector<std::string>& stats)
 	std::istringstream stats_data{ stats_str };
 	while (!std::isdigit(stats_data.peek()))
 	{
-		if (std::isspace(stats_data.peek()))
+		const char first_char = stats_data.peek();
+		if (std::isspace(first_char))
 		{
 			stats_data >> std::ws;
 		}
-		else if (std::isalpha(stats_data.peek()))
+		else if (std::isalpha(first_char) || (first_char == '[') || (first_char == ']') || (first_char == '(' || first_char == ')'))
 		{
 			std::string scratch;
 			stats_data >> scratch;
+		}
+		else
+		{
+			const char bad_char = first_char;
+			std::cout << std::format("    Choked processing digit {}['{}'] in '{}'\n", int{ bad_char }, bad_char, stats_str);
+			return Player{};
 		}
 	}
 

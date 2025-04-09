@@ -53,7 +53,7 @@ The parser converts this format:
 
     Name Stat1 Stat2
     #00 Joe Bloggs
-    Metadata about him 111 222
+    Metadata about him [which may be in brackets] 111 222
     #05 Jane Doe
     Other data 333 444
     
