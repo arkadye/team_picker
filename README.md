@@ -61,15 +61,25 @@ and so on. The first line gives a list of stats to collect. Each player is then 
 
 If you want a different format you'll have to edit/rewrite the `get_player()` function  and maybe the `read_header()` function too. 
 
+## Draft Evaluation data file
+
+By default this is `draft_class.txt`, but only if that file actually exists.
+
+If a draft class file is set, after picking a team this will iterate every player in the draft class and try to put them in the team. It will note how much they improve/hurt the team by, and their best position.
+
+It will then output a list of all the draftees, from best to worst.
+
 ## Composition
 
-By default this is `composition.txt`.
+By default this is `composition.txt`. Alternatives can be set from the command line.
 
 Any line beginning with `#` is a comment and will be ignored.
 
 List offensive positions on a line starting with `Offence:` and defensive ones on a line starting `Defence:`. Both lines must contain an equal number of positions.
 
 Positions can be repeated. An association football team would like like `GK LB CB CB RB LM CM CM RW ST ST` for example.
+
+Force a player to be on the team with `Force:` and then the player name. So `Force: Joe Bloggs` will force a player named *exactly* "Joe Bloggs" to be on the team, even if their evaluation is otherwise awful.
 
 Set calculations based on stats.
 

@@ -140,9 +140,20 @@ struct PositionRequirements
 	std::map<std::string, std::string> position_to_calculation;
 };
 
-PositionRequirements parse_position_requirements(std::istream& iss)
+struct ForcedPositions
+{
+	std::vector<std::string> forced_player;
+	bool contains(std::string_view name) const noexcept
+	{
+		auto find_result = std::ranges::find(forced_player, name);
+		return find_result != end(forced_player);
+	}
+};
+
+std::pair<PositionRequirements,ForcedPositions> parse_position_requirements(std::istream& iss)
 {
 	PositionRequirements result;
+	ForcedPositions forced_positions;
 	while (!iss.eof())
 	{
 		std::string line_data;
@@ -165,36 +176,60 @@ PositionRequirements parse_position_requirements(std::istream& iss)
 		const auto colon_pos = line.find(':');
 		if (colon_pos < line.size())
 		{
-			constexpr int UNINTIALIZED = 0;
-			constexpr int OFFENCE = 1;
-			constexpr int DEFENCE = 2;
+			enum class LineType
+			{
+				UNINITIALIZED,
+				OFFENCE,
+				DEFENCE,
+				FORCE
+			};
 
 			std::string_view prefix = trim_whitespace(line.substr(0, colon_pos));
-			int status = UNINTIALIZED;
+			std::string_view arg = trim_whitespace(line.substr(colon_pos + 1));
+
+			LineType status = LineType::UNINITIALIZED;
 			switch (prefix.front())
 			{
 			case 'o':
 			case 'O':
-				status = OFFENCE;
+				status = LineType::OFFENCE;
 				assert(result.attacking.empty());
 				break;
 			case 'd':
 			case 'D':
-				status = DEFENCE;
+				status = LineType::DEFENCE;
 				assert(result.defensive.empty());
 				break;
+			case 'f':
+			case 'F':
+				status = LineType::FORCE;
 			default:
 				break;
 			}
 
-			if (status == UNINTIALIZED) continue;
+			auto parse_positions = [arg, colon_pos](std::vector<std::string>& target)
+				{
+					std::istringstream positions{ std::string{ arg } };
+					std::ranges::copy(std::views::istream<std::string>(positions), std::back_inserter(target));
+				};
 
-			std::istringstream positions{ std::string{ line.substr(colon_pos + 1) } };
-			std::vector<std::string>& target = status == OFFENCE ? result.attacking : result.defensive;
-			std::copy(std::istream_iterator<std::string>{positions}, std::istream_iterator<std::string>{}, std::back_inserter(target));
+			switch (status)
+			{
+			case LineType::UNINITIALIZED:
+				break;
+			case LineType::OFFENCE:
+				parse_positions(result.attacking);
+				break;
+			case LineType::DEFENCE:
+				parse_positions(result.defensive);
+				break;
+			case LineType::FORCE:
+				forced_positions.forced_player.emplace_back(arg);
+				break;
+			}
 		}
 	}
-	return result;
+	return std::make_pair(std::move(result), std::move(forced_positions));
 }
 
 double evaluate_player(const Player& player, std::string_view calculation);
@@ -440,6 +475,8 @@ struct PickTempData
 	double max_score = 0.0f;
 };
 
+auto operator==(const PickTempData& l, const PickTempData& r) noexcept { return l.name == r.name; }
+
 PickTempData to_pick_data(const Player& p, const PositionRequirements& requirements)
 {
 	PickTempData r;
@@ -586,8 +623,8 @@ std::vector<StartingPositionDescription> make_line_up(
 std::pair<std::vector<StartingPositionDescription>, double> get_initial_try_starters(const std::vector<PickTempData>& data, const PositionRequirements& requirements)
 {
 	std::cout << "Picking initial starting line up...\n";
+	assert(requirements.attacking.size() == requirements.defensive.size());
 	const std::size_t target_size = requirements.attacking.size();
-	assert(requirements.defensive.size() == target_size);
 	assert(data.size() >= target_size);
 
 	auto first = begin(data);
@@ -603,24 +640,25 @@ std::pair<std::vector<StartingPositionDescription>, double> get_initial_try_star
 
 std::optional<std::pair<std::vector<StartingPositionDescription>, double>> try_swapping_in_player_for_player(
 	std::vector<const PickTempData*> picks,			// Current starting line up
-	const std::vector<PickTempData>& roster_data,	// Roster data
-	std::string_view player_in,						// Player in
-	std::string_view player_out,					// Player out
+	const PickTempData& player_in,					// Player in
+	const PickTempData& player_out,					// Player out
 	const PositionRequirements& requirements,		// Position requirements
+	const ForcedPositions& forced_picks,			// Player who must be in the line up
 	double current_best								// Current best evaluation
 )
 {
-	assert(std::ranges::find(picks, player_in, [](const PickTempData* elem) {return elem->name; }) == end(picks));
-
-	const auto pick_out_it = std::ranges::find(picks, player_out, &PickTempData::name);
-	assert(pick_out_it != end(picks));
-
-	const auto roster_in_it = std::ranges::find(roster_data, player_in, &PickTempData::name);
-	assert(roster_in_it != end(roster_data));
-
-	*pick_out_it = &(*roster_in_it);
+	if (forced_picks.contains(player_out.name))
+	{
+		return std::nullopt;
+	}
 
 	auto picks_view = picks | std::ranges::views::transform([](const PickTempData* e) {return *e; });
+	assert(std::ranges::find(picks, &player_in) == end(picks));
+
+	const auto pick_out_it = std::ranges::find(picks, &player_out);
+	assert(pick_out_it != end(picks));
+
+	*pick_out_it = &player_in;
 
 	const auto [attacking_lineup, attacking_score] = find_best_positions(picks_view, requirements.attacking);
 	const auto [defending_lineup, defending_score] = find_best_positions(picks_view, requirements.defensive);
@@ -636,44 +674,34 @@ std::optional<std::pair<std::vector<StartingPositionDescription>, double>> try_s
 
 std::optional<std::pair<std::vector<StartingPositionDescription>, double>> try_swapping_in_player(
 	const std::vector<const PickTempData*>& picks,	// Current starting line up
-	const std::vector<PickTempData>& roster_data,			// Roster data
-	std::string_view player_in,								// Player in
-	const PositionRequirements& requirements,				// Position requirements
-	double current_best										// Current best scores
+	const PickTempData& player_in,					// Player in
+	const PositionRequirements& requirements,		// Position requirements
+	const ForcedPositions& forced_picks,			// Player who must be in the line up
+	double current_best								// Current best scores
 )
 {
 	// If this is a player already in the starting lineup, skip them.
-	if (std::ranges::find(picks, player_in, &PickTempData::name) != end(picks))
+	if (std::ranges::find(picks, &player_in) != end(picks))
 	{
 		return std::nullopt;
 	}
 
-	auto get_pick_data_it = [&roster_data](std::string_view name)
-		{
-			return std::ranges::find(roster_data, name, &PickTempData::name);
-		};
+	const double original_score = current_best;
 
-	auto get_pick_data = [&get_pick_data_it, &roster_data](std::string_view name) -> const PickTempData&
-		{
-			const auto find_result = get_pick_data_it(name);
-			assert(find_result != end(roster_data));
-			return *find_result;
-		};
-
-	auto get_pick_data_ptr = [&get_pick_data](std::string_view name) -> const PickTempData*
-		{
-			const PickTempData& result = get_pick_data(name);
-			return &result;
-		};
+	// This player WILL end up on the team, one way or another.
+	if (forced_picks.contains(player_in.name))
+	{
+		current_best = std::numeric_limits<double>::min();
+	}
 
 	std::optional<std::pair<std::vector<StartingPositionDescription>, double>> result;
 	std::string_view player_out;
 	for (const PickTempData* starter : picks)
 	{
-		if (auto swap_result_optional = try_swapping_in_player_for_player(picks, roster_data, player_in, starter->name, requirements, current_best))
+		if (auto swap_result_optional = try_swapping_in_player_for_player(picks, player_in, *starter, requirements, forced_picks, current_best))
 		{
 			auto& [new_picks, new_best] = *swap_result_optional;
-			std::cout << std::format("     Score improvement replacing {}: {}\n", starter->name, (new_best - current_best));
+			std::cout << std::format("     Score improvement replacing {}: {}\n", starter->name, (new_best - original_score));
 			assert(new_best > current_best);
 			current_best = new_best;
 			result = std::move(*swap_result_optional);
@@ -683,19 +711,36 @@ std::optional<std::pair<std::vector<StartingPositionDescription>, double>> try_s
 
 	if (result.has_value())
 	{
-		std::cout << std::format("    Swapped in {} replacing {}\n", player_in, player_out);
+		std::cout << std::format("    Swapped in {} replacing {}\n", player_in.name, player_out);
 	}
 	return result;
 }
 
-std::vector<RosterPosition> pick_team(const std::vector<Player>& roster, const PositionRequirements& requirements)
+std::vector<PickTempData> make_pick_temp_data(const std::vector<Player>& roster, const PositionRequirements& requirements)
 {
 	std::vector<PickTempData> pick_data;
 	pick_data.reserve(roster.size());
 	std::ranges::transform(roster, std::back_inserter(pick_data), [&r = requirements](const Player& p) {return to_pick_data(p, r); });
 	std::ranges::sort(pick_data, {}, [](const PickTempData& ptd) {return -ptd.max_score; });
+	return pick_data;
+}
 
-	auto [starters, best_score] = get_initial_try_starters(pick_data, requirements);
+std::vector<const PickTempData*> make_starter_data(const std::vector<StartingPositionDescription>& starters, const std::vector<PickTempData>& roster)
+{
+	std::vector<const PickTempData*> starter_data;
+	starter_data.reserve(starters.size());
+	std::ranges::transform(starters, std::back_inserter(starter_data), [&roster](const StartingPositionDescription& starter)
+		{
+			auto find_result = std::ranges::find(roster, starter.name, &PickTempData::name);
+			assert(find_result != end(roster));
+			return &(*find_result);
+		});
+	return starter_data;
+}
+
+std::pair<std::vector<StartingPositionDescription>, double> pick_team(const std::vector<PickTempData>& roster, const PositionRequirements& requirements, const ForcedPositions& forced_picks)
+{
+	auto [starters, best_score] = get_initial_try_starters(roster, requirements);
 	std::ranges::sort(starters, {}, &StartingPositionDescription::score);
 
 	bool has_made_change = true;
@@ -704,23 +749,16 @@ std::vector<RosterPosition> pick_team(const std::vector<Player>& roster, const P
 	{
 		has_made_change = false;
 
-		std::vector<const PickTempData*> starter_data;
-		starter_data.reserve(starters.size());
-		std::ranges::transform(starters, std::back_inserter(starter_data), [&pick_data](const StartingPositionDescription& starter)
-			{
-				auto find_result = std::ranges::find(pick_data, starter.name, &PickTempData::name);
-				assert(find_result != end(pick_data));
-				return &(*find_result);
-			});
+		const std::vector<const PickTempData*> starter_data = make_starter_data(starters, roster);
 
-		for (const PickTempData& trial_player : pick_data)
+		for (const PickTempData& trial_player : roster)
 		{
 			std::cout << std::format("{}: trying {} as a starter.\n", changes_tried++, trial_player.name);
-			if (auto swap_result_opt = try_swapping_in_player(starter_data, pick_data, trial_player.name, requirements, best_score))
+			if (auto swap_result_opt = try_swapping_in_player(starter_data, trial_player, requirements, forced_picks, best_score))
 			{
 				std::cout << "    Swap made. Restarting.\n";
 				auto& [new_starters, new_score] = *swap_result_opt;
-				assert(new_score > best_score);
+				assert(new_score > best_score || forced_picks.contains(trial_player.name));
 				best_score = new_score;
 				starters = std::move(new_starters);
 				has_made_change = true;
@@ -728,100 +766,77 @@ std::vector<RosterPosition> pick_team(const std::vector<Player>& roster, const P
 			}
 		}
 	}
+	return { starters, best_score };
+}
+
+RosterPosition make_roster_position(const StartingPositionDescription& spd)
+{
+	RosterPosition r;
+	r.name = std::string{ spd.name };
+	r.offence = std::string{ spd.offence.position };
+	r.defence = std::string{ spd.defence.position };
+	r.offensive_score = spd.offence.score;
+	r.defensive_score = spd.defence.score;
+	r.total_score = spd.score;
+	return r;
+}
+
+std::vector<RosterPosition> pick_team(const std::vector<Player>& roster, const PositionRequirements& requirements, const ForcedPositions& forced_picks)
+{
+	const std::vector<PickTempData> pick_data = make_pick_temp_data(roster, requirements);
+
+	auto [starters, best_score] = pick_team(pick_data, requirements, forced_picks);
+	std::ranges::sort(starters, {}, &StartingPositionDescription::score);
+
 	std::vector<RosterPosition> result;
 	result.reserve(starters.size());
-	std::transform(begin(starters), end(starters), std::back_inserter(result),
-		[](const StartingPositionDescription& spd)
-		{
-			RosterPosition r;
-			r.name = std::string{ spd.name };
-			r.offence = std::string{ spd.offence.position };
-			r.defence = std::string{ spd.defence.position };
-			r.offensive_score = spd.offence.score;
-			r.defensive_score = spd.defence.score;
-			r.total_score = spd.score;
-			return r;
-		});
+	std::ranges::transform(starters, std::back_inserter(result), make_roster_position);
 	return result;
 }
 
-int main(int argc, char** argv)
+RosterPosition evaluate_draftee(const std::vector<const PickTempData*> starter_data, const Player& evaluee, const PositionRequirements& requirements, ForcedPositions& forced_picks)
 {
-	auto quit = []()
+	const PickTempData evaluee_data = to_pick_data(evaluee, requirements);
+	forced_picks.forced_player.push_back(evaluee.name);
+	auto swap_in_result_opt = try_swapping_in_player(starter_data, evaluee_data, requirements, forced_picks, 0.0);
+	forced_picks.forced_player.pop_back();
+
+	assert(swap_in_result_opt.has_value());
+	const auto& [team_result, squad_strength] = *swap_in_result_opt;
+	auto evaluee_result_it = std::ranges::find(team_result, evaluee.name, &StartingPositionDescription::name);
+	assert(evaluee_result_it != end(team_result));
+	RosterPosition result = make_roster_position(*evaluee_result_it);
+	result.total_score = squad_strength;
+	return result;
+}
+
+std::vector<RosterPosition> evaluate_all_draftees(const std::vector<Player>& roster, const std::vector<Player>& draft_class, const PositionRequirements& requirements, const ForcedPositions& forced_picks)
+{
+	const std::vector<PickTempData> roster_pick_data = make_pick_temp_data(roster, requirements);
+
+	const auto [starters, starters_score] = pick_team(roster_pick_data, requirements, forced_picks);
+
+	const std::vector<const PickTempData*> starter_data = make_starter_data(starters, roster_pick_data);
+
+	auto mutable_forced_picks = forced_picks;
+	auto evaluate = [&starter_data, &requirements, &mutable_forced_picks, starters_score](const Player& player)
 		{
-			std::cout << "Press 'Enter' to quit.";
-			std::cin.get();
-			exit(0);
+			RosterPosition result = evaluate_draftee(starter_data, player, requirements, mutable_forced_picks);
+			result.total_score -= starters_score;
+			return result;
 		};
 
-	std::cout << "Reading command line args\n";
-	std::filesystem::path team_data{ "team_data.txt" };
-	std::filesystem::path composition{ "composition.txt" };
-	{
-		enum class ArgState
-		{
-			NotFound,
-			Next,
-			Found
-		};
-		ArgState td_state = ArgState::NotFound;
-		ArgState cmp_state = ArgState::NotFound;
-		for (int i = 1; i < argc; ++i)
-		{
-			std::string_view arg{ argv[i] };
-			if (cicmp(arg, "--help") || cicmp(arg, "-help") || cicmp(arg, "help"))
-			{
-				std::cout << "Team Picker by arkadye.\n"
-					"Usage: arguments optional.\n"
-					"    --team-data [path]: a path to a team data file\n"
-					"    --composition [path]: a path to a composition file\n"
-					"For more info and latest versions visit https://github.com/arkadye/team_picker\n";
-				quit();
-			}
-			auto handle_arg = [arg, &quit](std::filesystem::path& target, ArgState& state, std::string_view match)
-				{
-					if (state == ArgState::Next)
-					{
-						target = arg;
-						state = ArgState::Next;
-						return;
-					}
+	std::vector<RosterPosition> draft_pick_data;
+	draft_pick_data.reserve(draft_class.size());
+	std::ranges::transform(draft_class, std::back_inserter(draft_pick_data), evaluate);
+	std::ranges::sort(draft_pick_data, {}, [](const RosterPosition& rp) {return -rp.total_score; });
+	return draft_pick_data;
+}
 
-					if (cicmp(arg, match))
-					{
-						if (state == ArgState::Found)
-						{
-							std::cout << "Multiple " << match << " arguments found!\n";
-							quit();
-						}
-						state = ArgState::Next;
-					}
-				};
-
-			handle_arg(team_data, td_state, "--team-data");
-			handle_arg(composition, cmp_state, "--composition");
-		}
-	}
-	std::cout << "Loading " << team_data << '\n';
-	std::ifstream team_input{ team_data };
-	if (!team_input.is_open())
-	{
-		std::cout << "Could not open " << team_data << '\n';
-		quit();
-	}
-	const std::vector<Player> roster = get_roster(team_input);
-
-	std::cout << "Loading " << composition << '\n';
-	std::ifstream req_input{ composition };
-	if (!req_input.is_open())
-	{
-		std::cout << "Could not open " << composition << '\n';
-		quit();
-	}
-	PositionRequirements requirements = parse_position_requirements(req_input);
-
+void run_pick_team_mode(const std::vector<Player>& roster, const PositionRequirements& requirements, const ForcedPositions& forced_positions)
+{
 	std::cout << "Picking the team...\n";
-	std::vector<RosterPosition> picks = pick_team(roster, requirements);
+	std::vector<RosterPosition> picks = pick_team(roster, requirements, forced_positions);
 
 	std::cout << "\nTEAM PICKED:\n";
 
@@ -867,6 +882,132 @@ int main(int argc, char** argv)
 		team_defensive_score,
 		team_total_score
 	);
+}
 
+void run_evaluate_draft_mode(const std::vector<Player>& roster, const std::vector<Player> draft_class, const PositionRequirements& requirements, const ForcedPositions& forced_positions)
+{
+	const std::vector<RosterPosition> output = evaluate_all_draftees(roster, draft_class, requirements, forced_positions);
+	const std::size_t max_name_len = std::ranges::max(output, {}, [](const RosterPosition& rp) {return rp.name.size(); }).name.size();
+	const std::size_t max_off_len = std::ranges::max(output, {}, [](const RosterPosition& rp) {return rp.offence.size(); }).offence.size();
+	const std::size_t max_def_len = std::ranges::max(output, {}, [](const RosterPosition& rp) {return rp.defence.size(); }).defence.size();
+
+	std::cout << "DRAFTEE EVALUATIONS\n";
+	for (const RosterPosition& pick : output)
+	{
+		std::cout << std::format("{:{}} / {:{}} - {:{}} {:.0f} + {:.0f} = {:.0f}\n",
+			pick.offence, max_off_len,
+			pick.defence, max_def_len,
+			pick.name, max_name_len,
+			pick.offensive_score,
+			pick.defensive_score,
+			pick.total_score
+		);
+	}
+}
+
+int main(int argc, char** argv)
+{
+	auto quit = []()
+		{
+			std::cout << "Press 'Enter' to quit.";
+			std::cin.get();
+			exit(0);
+		};
+
+	std::cout << "Reading command line args\n";
+	std::filesystem::path team_data{ "team_data.txt" };
+	std::filesystem::path composition{ "composition.txt" };
+	std::filesystem::path draft_class;
+	if (std::filesystem::exists("draft_class.txt"))
+	{
+		draft_class = "draft_class.txt";
+	}
+	{
+		enum class ArgState
+		{
+			NotFound,
+			Next,
+			Found
+		};
+		ArgState td_state = ArgState::NotFound;
+		ArgState cmp_state = ArgState::NotFound;
+		ArgState df_state = ArgState::NotFound;
+		for (int i = 1; i < argc; ++i)
+		{
+			std::string_view arg{ argv[i] };
+			if (cicmp(arg, "--help") || cicmp(arg, "-help") || cicmp(arg, "help"))
+			{
+				std::cout << "Team Picker by arkadye.\n"
+					"Usage: arguments optional.\n"
+					"    --team-data [path]: a path to a team data file\n"
+					"    --composition [path]: a path to a composition file\n"
+					"    --draft-class [path]: [OPTIONAL] a path to a list of potential signings. Puts team picker in draft mode."
+					"For more info and latest versions visit https://github.com/arkadye/team_picker\n";
+				quit();
+			}
+			auto handle_arg = [arg, &quit](std::filesystem::path& target, ArgState& state, std::string_view match)
+				{
+					if (state == ArgState::Next)
+					{
+						target = arg;
+						state = ArgState::Next;
+						return;
+					}
+
+					if (cicmp(arg, match))
+					{
+						if (state == ArgState::Found)
+						{
+							std::cout << "Multiple " << match << " arguments found!\n";
+							quit();
+						}
+						state = ArgState::Next;
+					}
+				};
+
+			handle_arg(team_data, td_state, "--team-data");
+			handle_arg(composition, cmp_state, "--composition");
+			handle_arg(draft_class, df_state, "--draft-class");
+		}
+	}
+	std::cout << "Loading " << team_data << '\n';
+	std::ifstream team_input{ team_data };
+	if (!team_input.is_open())
+	{
+		std::cout << std::format("Could not open {}\n", team_data.generic_string());
+		quit();
+	}
+	const std::vector<Player> roster = get_roster(team_input);
+
+	std::cout << "Loading " << composition << '\n';
+	std::ifstream req_input{ composition };
+	if (!req_input.is_open())
+	{
+		std::cout << std::format("Could not open {}\n", composition.generic_string());
+		quit();
+	}
+	const auto [requirements , forced_positions] = parse_position_requirements(req_input);
+
+	std::vector<Player> draft_roster;
+	if (!draft_class.empty())
+	{
+		std::cout << "Loading " << draft_class << '\n';
+		std::ifstream draft_input{ draft_class };
+		if (!draft_input.is_open())
+		{
+			std::cout << std::format("Could not open {}\n", draft_class.generic_string());
+			quit();
+		}
+		draft_roster = get_roster(draft_input);
+	}
+
+	if (draft_roster.empty())
+	{
+		run_pick_team_mode(roster, requirements, forced_positions);
+	}
+	else
+	{
+		run_evaluate_draft_mode(roster, draft_roster, requirements, forced_positions);
+	}
 	quit();
 }
