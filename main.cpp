@@ -18,6 +18,14 @@
 
 using IST = std::istream_iterator<std::string>;
 
+struct PositionRequirements
+{
+	std::vector<std::string> attacking, defensive;
+	std::map<std::string, std::string> position_to_calculation;
+	std::map<std::string, int> set_values;
+	std::map<std::string, int> stat_defaults;
+};
+
 std::string_view trim_whitespace(std::string_view in)
 {
 	while (!in.empty() && isspace(in.front()))
@@ -50,7 +58,7 @@ std::vector<std::string> read_header(std::istream& is)
 	{
 		std::string name_str;
 		header_line >> name_str;
-		assert(name_str == "Name");
+		assert(name_str == "NAME");
 	}
 
 	std::vector<std::string> result;
@@ -58,7 +66,7 @@ std::vector<std::string> read_header(std::istream& is)
 	return result;
 }
 
-Player get_player(std::istream& is, const std::vector<std::string>& stats)
+Player get_player(std::istream& is, const std::vector<std::string>& stats, const PositionRequirements& position_requirements)
 {
 	Player result;
 	is >> std::ws;
@@ -93,18 +101,43 @@ Player get_player(std::istream& is, const std::vector<std::string>& stats)
 		}
 	}
 
+	auto get_stat = [&value_conversions = position_requirements.set_values](std::string_view data)
+		{
+			{
+				int result{};
+				const auto conversion_result = std::from_chars(data.data(), data.data() + data.size(), result);
+				if (conversion_result.ec == std::errc{})
+				{
+					return result;
+				}
+			}
+
+			auto find_result = value_conversions.find(std::string{ data });
+			assert(find_result != end(value_conversions) && "Could not find data field in value conversions");
+			return find_result->second;
+		};
+
+	std::string stat;
 	for (const std::string& stat_name : stats)
 	{
 		assert(!stats_data.eof());
-		int stat = 0;
 		stats_data >> stat;
-		result.stats.insert(std::pair{ stat_name, stat });
+		result.stats.emplace(stat_name, get_stat(stat));
 	}
+
+	for (const auto& [stat, default_value] : position_requirements.stat_defaults)
+	{
+		if (!result.stats.contains(stat))
+		{
+			result.stats.emplace(stat, default_value);
+		}
+	}
+
 	std::cout << std::format("    Read in player {}\n", result.name);
 	return result;
 }
 
-std::vector<Player> get_roster(std::istream& input)
+std::vector<Player> get_roster(std::istream& input, const PositionRequirements& position_requirements)
 {
 	std::stringstream preprocessed;
 
@@ -115,6 +148,7 @@ std::vector<Player> get_roster(std::istream& input)
 	{
 		std::string line;
 		std::getline(input, line);
+		std::ranges::transform(line, begin(line),::toupper);
 		if (!(line.empty() || std::ranges::all_of(line, ::isspace)))
 		{
 			preprocessed << (first ? "" : "\n") << line;
@@ -128,17 +162,11 @@ std::vector<Player> get_roster(std::istream& input)
 	const std::vector<std::string> header = read_header(preprocessed);
 	while (!preprocessed.eof())
 	{
-		Player new_player = get_player(preprocessed, header);
+		Player new_player = get_player(preprocessed, header, position_requirements);
 		result.push_back(std::move(new_player));
 	}
 	return result;
 }
-
-struct PositionRequirements
-{
-	std::vector<std::string> attacking, defensive;
-	std::map<std::string, std::string> position_to_calculation;
-};
 
 struct ForcedPositions
 {
@@ -154,10 +182,12 @@ std::pair<PositionRequirements,ForcedPositions> parse_position_requirements(std:
 {
 	PositionRequirements result;
 	ForcedPositions forced_positions;
+	std::string post_step;
 	while (!iss.eof())
 	{
 		std::string line_data;
 		std::getline(iss, line_data);
+		std::ranges::transform(line_data, begin(line_data), ::toupper);
 		std::string_view line = line_data;
 		if (line.empty() || line.front() == '#')
 		{
@@ -181,7 +211,10 @@ std::pair<PositionRequirements,ForcedPositions> parse_position_requirements(std:
 				UNINITIALIZED,
 				OFFENCE,
 				DEFENCE,
-				FORCE
+				FORCE,
+				SET,
+				POST,
+				INITIALIZE
 			};
 
 			std::string_view prefix = trim_whitespace(line.substr(0, colon_pos));
@@ -203,6 +236,20 @@ std::pair<PositionRequirements,ForcedPositions> parse_position_requirements(std:
 			case 'f':
 			case 'F':
 				status = LineType::FORCE;
+				break;
+			case 'S':
+			case 's':
+				status = LineType::SET;
+				break;
+			case 'P':
+			case 'p':
+				status = LineType::POST;
+				assert(post_step.empty());
+				break;
+			case 'I':
+			case 'i':
+				status = LineType::INITIALIZE;
+				break;
 			default:
 				break;
 			}
@@ -211,6 +258,15 @@ std::pair<PositionRequirements,ForcedPositions> parse_position_requirements(std:
 				{
 					std::istringstream positions{ std::string{ arg } };
 					std::ranges::copy(std::views::istream<std::string>(positions), std::back_inserter(target));
+				};
+
+			auto parse_set_values = [arg]()
+				{
+					std::istringstream positions{ std::string{ arg } };
+					std::string key;
+					int value{};
+					positions >> key >> value;
+					return std::pair<const std::string, int>{ key , value };
 				};
 
 			switch (status)
@@ -226,9 +282,27 @@ std::pair<PositionRequirements,ForcedPositions> parse_position_requirements(std:
 			case LineType::FORCE:
 				forced_positions.forced_player.emplace_back(arg);
 				break;
+			case LineType::POST:
+				post_step = arg;
+				break;
+			case LineType::SET:
+				result.set_values.insert(parse_set_values());
+				break;
+			case LineType::INITIALIZE:
+				result.stat_defaults.insert(parse_set_values());
+				break;
 			}
 		}
 	}
+
+	if (!post_step.empty())
+	{
+		for (auto& [position,calculation] : result.position_to_calculation)
+		{
+			calculation = std::format("({}) {}", calculation, post_step);
+		}
+	}
+
 	return std::make_pair(std::move(result), std::move(forced_positions));
 }
 
@@ -238,7 +312,7 @@ double evaluate_player_op(const Player& player, std::string_view calculation, st
 {
 	std::string_view left = calculation.substr(0, op_pos);
 	std::string_view op = calculation.substr(op_pos, op_len);
-	std::string_view right = calculation.substr(op_pos + op_len);
+	std::string_view right = calculation.substr(op_pos + op_len);	
 	const double l = evaluate_player(player, left);
 	const double r = evaluate_player(player, right);
 
@@ -338,7 +412,7 @@ double evaluate_player(const Player& player, std::string_view calculation)
 
 	for (const auto& [stat, val] : player.stats)
 	{
-		if (cicmp(stat, calculation)) return static_cast<double>(val);
+		if (stat == calculation) return static_cast<double>(val);
 	}
 
 	std::array<std::string_view, 5> functions{
@@ -353,7 +427,7 @@ double evaluate_player(const Player& player, std::string_view calculation)
 		{
 			if (calculation.size() < fn.size()) return false;
 			std::string_view prefix = calculation.substr(0, fn.size());
-			return cicmp(prefix, fn);
+			return prefix == fn;
 		});
 
 	if (find_result == end(functions))
@@ -903,6 +977,13 @@ void run_evaluate_draft_mode(const std::vector<Player>& roster, const std::vecto
 			pick.total_score
 		);
 	}
+
+	std::cout << "\n\nPICKS\n||";
+	for (const RosterPosition& pick : output | std::views::take(32))
+	{
+		std::cout << std::format("`{:{}}`\n", pick.name, max_name_len);
+	}
+	std::cout << "||\n";
 }
 
 int main(int argc, char** argv)
@@ -970,14 +1051,6 @@ int main(int argc, char** argv)
 			handle_arg(draft_class, df_state, "--draft-class");
 		}
 	}
-	std::cout << "Loading " << team_data << '\n';
-	std::ifstream team_input{ team_data };
-	if (!team_input.is_open())
-	{
-		std::cout << std::format("Could not open {}\n", team_data.generic_string());
-		quit();
-	}
-	const std::vector<Player> roster = get_roster(team_input);
 
 	std::cout << "Loading " << composition << '\n';
 	std::ifstream req_input{ composition };
@@ -987,6 +1060,15 @@ int main(int argc, char** argv)
 		quit();
 	}
 	const auto [requirements , forced_positions] = parse_position_requirements(req_input);
+
+	std::cout << "Loading " << team_data << '\n';
+	std::ifstream team_input{ team_data };
+	if (!team_input.is_open())
+	{
+		std::cout << std::format("Could not open {}\n", team_data.generic_string());
+		quit();
+	}
+	const std::vector<Player> roster = get_roster(team_input, requirements);
 
 	std::vector<Player> draft_roster;
 	if (!draft_class.empty())
@@ -998,7 +1080,7 @@ int main(int argc, char** argv)
 			std::cout << std::format("Could not open {}\n", draft_class.generic_string());
 			quit();
 		}
-		draft_roster = get_roster(draft_input);
+		draft_roster = get_roster(draft_input, requirements);
 	}
 
 	if (draft_roster.empty())
